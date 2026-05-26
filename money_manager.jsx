@@ -468,7 +468,7 @@ export default function App() {
           flex: 1;
           overflow-y: auto;
           padding: 16px;
-          padding-bottom: 100px;
+          padding-bottom: calc(90px + env(safe-area-inset-bottom, 16px));
           box-sizing: border-box;
           -webkit-overflow-scrolling: touch;
         }
@@ -478,17 +478,18 @@ export default function App() {
           bottom: 0;
           left: 0;
           right: 0;
-          height: 72px;
-          background: rgba(255, 255, 255, 0.85);
+          background: rgba(255, 255, 255, 0.92);
           backdrop-filter: blur(12px);
           -webkit-backdrop-filter: blur(12px);
-          border-top: 1px solid rgba(0, 0, 0, 0.05);
+          border-top: 1px solid rgba(0, 0, 0, 0.07);
           display: flex;
           justify-content: space-around;
           align-items: center;
           z-index: 2000;
-          padding-bottom: env(safe-area-inset-bottom);
+          padding-top: 8px;
+          padding-bottom: calc(8px + env(safe-area-inset-bottom, 12px));
           box-sizing: border-box;
+          min-height: 64px;
         }
         
         .app-nav-item {
@@ -519,7 +520,7 @@ export default function App() {
         
         .app-fab-add {
           position: absolute;
-          bottom: 24px;
+          bottom: calc(20px + env(safe-area-inset-bottom, 12px));
           left: 50%;
           transform: translateX(-50%);
           width: 56px;
