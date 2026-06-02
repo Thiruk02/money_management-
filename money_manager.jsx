@@ -57,8 +57,18 @@ function loadData(email) {
     const raw = localStorage.getItem(storageKey(email));
     if (raw) {
       const parsed = JSON.parse(raw);
+      let cash = parsed.cashBalance;
+      let online = parsed.onlineBalance;
+      if (cash === undefined && online === undefined) {
+        cash = parsed.balance ?? 0;
+        online = 0;
+      } else {
+        cash = cash ?? 0;
+        online = online ?? 0;
+      }
       return {
-        balance: parsed.balance ?? 0,
+        cashBalance: cash,
+        onlineBalance: online,
         transactions: parsed.transactions ?? [],
         customCategories: parsed.customCategories ?? [],
       };
@@ -66,7 +76,7 @@ function loadData(email) {
   } catch {
     /* ignore */
   }
-  return { balance: 0, transactions: [], customCategories: [] };
+  return { cashBalance: 0, onlineBalance: 0, transactions: [], customCategories: [] };
 }
 
 function saveData(email, data) {
@@ -209,10 +219,15 @@ export default function App() {
   const [user, setUser] = useState(null);
   const [hydrated, setHydrated] = useState(false);
   const [tab, setTab] = useState("home");
-  const [balance, setBalance] = useState(0);
+  
+  // Wallet Balances
+  const [cashBalance, setCashBalance] = useState(0);
+  const [onlineBalance, setOnlineBalance] = useState(0);
+  
   const [transactions, setTransactions] = useState([]);
   const [customCategories, setCustomCategories] = useState([]);
 
+  // Modal / Transaction entry states
   const [expenseOpen, setExpenseOpen] = useState(false);
   const [incomeOpen, setIncomeOpen] = useState(false);
   const [addMenuOpen, setAddMenuOpen] = useState(false);
@@ -223,6 +238,25 @@ export default function App() {
   const [expenseCategoryId, setExpenseCategoryId] = useState(DEFAULT_CATEGORIES[0]?.id ?? "");
   const [addCategoryOpen, setAddCategoryOpen] = useState(false);
   const [newCategoryName, setNewCategoryName] = useState("");
+
+  // Payment Method toggles
+  const [expensePaymentMethod, setExpensePaymentMethod] = useState("cash"); // 'cash' or 'online'
+  const [incomePaymentMethod, setIncomePaymentMethod] = useState("cash");   // 'cash' or 'online'
+
+  // Transfer states
+  const [transferOpen, setTransferOpen] = useState(false);
+  const [transferAmount, setTransferAmount] = useState("");
+  const [transferDirection, setTransferDirection] = useState("cash_to_online"); // 'cash_to_online' or 'online_to_cash'
+  const [transferNote, setTransferNote] = useState("");
+
+  // Adjust balance states
+  const [adjustOpen, setAdjustOpen] = useState(false);
+  const [adjustCash, setAdjustCash] = useState("");
+  const [adjustOnline, setAdjustOnline] = useState("");
+
+  // Filtering states
+  const [historyFilter, setHistoryFilter] = useState("all"); // 'all', 'cash', 'online'
+  const [analyticsFilter, setAnalyticsFilter] = useState("all"); // 'all', 'cash', 'online'
 
   const [toast, setToast] = useState(null);
   const toastTimer = useRef(null);
@@ -238,7 +272,8 @@ export default function App() {
     if (u?.email) {
       setUser(u);
       const d = loadData(u.email);
-      setBalance(d.balance);
+      setCashBalance(d.cashBalance);
+      setOnlineBalance(d.onlineBalance);
       setTransactions(d.transactions);
       setCustomCategories(d.customCategories);
     }
@@ -248,10 +283,12 @@ export default function App() {
   const categories = allCategories(customCategories);
 
   const persist = useCallback(
-    (nextBalance, nextTx, nextCustom) => {
+    (nextCash, nextOnline, nextTx, nextCustom) => {
       if (!user?.email) return;
       saveData(user.email, {
-        balance: nextBalance,
+        cashBalance: nextCash,
+        onlineBalance: nextOnline,
+        balance: nextCash + nextOnline, // back compatibility
         transactions: nextTx,
         customCategories: nextCustom,
       });
@@ -263,7 +300,8 @@ export default function App() {
     saveUser(profile);
     setUser(profile);
     const d = loadData(profile.email);
-    setBalance(d.balance);
+    setCashBalance(d.cashBalance);
+    setOnlineBalance(d.onlineBalance);
     setTransactions(d.transactions);
     setCustomCategories(d.customCategories);
     setExpenseCategoryId(DEFAULT_CATEGORIES[0]?.id ?? "");
@@ -273,12 +311,15 @@ export default function App() {
   const handleLogout = useCallback(() => {
     saveUser(null);
     setUser(null);
-    setBalance(0);
+    setCashBalance(0);
+    setOnlineBalance(0);
     setTransactions([]);
     setCustomCategories([]);
     setTab("home");
     setExpenseOpen(false);
     setIncomeOpen(false);
+    setTransferOpen(false);
+    setAdjustOpen(false);
     showToast("Signed out.");
   }, [showToast]);
 
@@ -293,8 +334,9 @@ export default function App() {
       showToast("Enter a valid amount.");
       return;
     }
-    if (amt > balance) {
-      showToast("Insufficient funds in your wallet.");
+    const currentBal = expensePaymentMethod === "cash" ? cashBalance : onlineBalance;
+    if (amt > currentBal) {
+      showToast(`Insufficient funds in ${expensePaymentMethod === "cash" ? "Cash in Hand" : "UPI/Banking"}.`);
       return;
     }
     const tx = {
@@ -303,18 +345,26 @@ export default function App() {
       amount: amt,
       categoryId: expenseCategoryId,
       note: expenseNote.trim(),
+      paymentMethod: expensePaymentMethod,
       date: new Date().toISOString(),
     };
-    const nextBal = balance - amt;
+    let nextCash = cashBalance;
+    let nextOnline = onlineBalance;
+    if (expensePaymentMethod === "cash") {
+      nextCash -= amt;
+    } else {
+      nextOnline -= amt;
+    }
     const nextTx = [tx, ...transactions];
-    setBalance(nextBal);
+    setCashBalance(nextCash);
+    setOnlineBalance(nextOnline);
     setTransactions(nextTx);
-    persist(nextBal, nextTx, customCategories);
+    persist(nextCash, nextOnline, nextTx, customCategories);
     setExpenseAmount("");
     setExpenseNote("");
     setExpenseOpen(false);
-    showToast(`Expense ${fmt(amt)} saved`);
-  }, [user, expenseAmount, expenseCategoryId, expenseNote, balance, transactions, customCategories, persist, showToast]);
+    showToast(`Expense ${fmt(amt)} saved via ${expensePaymentMethod === "cash" ? "Cash" : "UPI/Online"}`);
+  }, [user, expenseAmount, expenseCategoryId, expenseNote, expensePaymentMethod, cashBalance, onlineBalance, transactions, customCategories, persist, showToast]);
 
   const addIncome = useCallback(() => {
     const amt = parseFloat(incomeAmount);
@@ -327,18 +377,65 @@ export default function App() {
       type: "income",
       amount: amt,
       note: incomeNote.trim(),
+      paymentMethod: incomePaymentMethod,
       date: new Date().toISOString(),
     };
-    const nextBal = balance + amt;
+    let nextCash = cashBalance;
+    let nextOnline = onlineBalance;
+    if (incomePaymentMethod === "cash") {
+      nextCash += amt;
+    } else {
+      nextOnline += amt;
+    }
     const nextTx = [tx, ...transactions];
-    setBalance(nextBal);
+    setCashBalance(nextCash);
+    setOnlineBalance(nextOnline);
     setTransactions(nextTx);
-    persist(nextBal, nextTx, customCategories);
+    persist(nextCash, nextOnline, nextTx, customCategories);
     setIncomeAmount("");
     setIncomeNote("");
     setIncomeOpen(false);
-    showToast(`Income ${fmt(amt)} added`);
-  }, [user, incomeAmount, incomeNote, balance, transactions, customCategories, persist, showToast]);
+    showToast(`Income ${fmt(amt)} added to ${incomePaymentMethod === "cash" ? "Cash" : "UPI/Online"}`);
+  }, [user, incomeAmount, incomeNote, incomePaymentMethod, cashBalance, onlineBalance, transactions, customCategories, persist, showToast]);
+
+  const addTransfer = useCallback(() => {
+    const amt = parseFloat(transferAmount);
+    if (!user?.email || !Number.isFinite(amt) || amt <= 0) {
+      showToast("Enter a valid amount.");
+      return;
+    }
+    const sourceBal = transferDirection === "cash_to_online" ? cashBalance : onlineBalance;
+    if (amt > sourceBal) {
+      showToast(`Insufficient funds in ${transferDirection === "cash_to_online" ? "Cash in Hand" : "UPI/Banking"}.`);
+      return;
+    }
+    const tx = {
+      id: `tx_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
+      type: "transfer",
+      amount: amt,
+      transferDirection: transferDirection,
+      note: transferNote.trim(),
+      date: new Date().toISOString(),
+    };
+    let nextCash = cashBalance;
+    let nextOnline = onlineBalance;
+    if (transferDirection === "cash_to_online") {
+      nextCash -= amt;
+      nextOnline += amt;
+    } else {
+      nextOnline -= amt;
+      nextCash += amt;
+    }
+    const nextTx = [tx, ...transactions];
+    setCashBalance(nextCash);
+    setOnlineBalance(nextOnline);
+    setTransactions(nextTx);
+    persist(nextCash, nextOnline, nextTx, customCategories);
+    setTransferAmount("");
+    setTransferNote("");
+    setTransferOpen(false);
+    showToast(`Transferred ${fmt(amt)} successfully`);
+  }, [user, transferAmount, transferDirection, transferNote, cashBalance, onlineBalance, transactions, customCategories, persist, showToast]);
 
   const confirmAddCustomCategory = useCallback(() => {
     const name = newCategoryName.trim();
@@ -357,38 +454,222 @@ export default function App() {
     const nextCustom = [...customCategories, cat];
     setCustomCategories(nextCustom);
     setExpenseCategoryId(cat.id);
-    persist(balance, transactions, nextCustom);
+    persist(cashBalance, onlineBalance, transactions, nextCustom);
     setNewCategoryName("");
     setAddCategoryOpen(false);
     showToast(`Category "${cat.label}" added`);
-  }, [newCategoryName, customCategories, balance, transactions, persist, showToast]);
+  }, [newCategoryName, customCategories, cashBalance, onlineBalance, transactions, persist, showToast]);
 
   const deleteTransaction = useCallback(
     (id) => {
       const tx = transactions.find((t) => t.id === id);
       if (!tx) return;
-      let nextBal = balance;
-      if (tx.type === "expense") nextBal += tx.amount;
-      else nextBal -= tx.amount;
+      let nextCash = cashBalance;
+      let nextOnline = onlineBalance;
+
+      if (tx.type === "expense") {
+        const method = tx.paymentMethod || "cash";
+        if (method === "cash") nextCash += tx.amount;
+        else nextOnline += tx.amount;
+      } else if (tx.type === "income") {
+        const method = tx.paymentMethod || "cash";
+        if (method === "cash") nextCash -= tx.amount;
+        else nextOnline -= tx.amount;
+      } else if (tx.type === "transfer") {
+        const dir = tx.transferDirection || "cash_to_online";
+        if (dir === "cash_to_online") {
+          nextCash += tx.amount;
+          nextOnline -= tx.amount;
+        } else {
+          nextOnline += tx.amount;
+          nextCash -= tx.amount;
+        }
+      }
+
       const nextTx = transactions.filter((t) => t.id !== id);
-      setBalance(nextBal);
+      setCashBalance(nextCash);
+      setOnlineBalance(nextOnline);
       setTransactions(nextTx);
-      persist(nextBal, nextTx, customCategories);
+      persist(nextCash, nextOnline, nextTx, customCategories);
       showToast("Transaction removed");
     },
-    [transactions, balance, customCategories, persist, showToast]
+    [transactions, cashBalance, onlineBalance, customCategories, persist, showToast]
   );
 
-  const expenseTotal = transactions.filter((t) => t.type === "expense").reduce((s, t) => s + t.amount, 0);
+  const openAdjustBalances = useCallback(() => {
+    setAdjustCash(cashBalance.toString());
+    setAdjustOnline(onlineBalance.toString());
+    setAdjustOpen(true);
+  }, [cashBalance, onlineBalance]);
+
+  const saveAdjustBalances = useCallback(() => {
+    const cashAmt = parseFloat(adjustCash);
+    const onlineAmt = parseFloat(adjustOnline);
+    if (!Number.isFinite(cashAmt) || cashAmt < 0 || !Number.isFinite(onlineAmt) || onlineAmt < 0) {
+      showToast("Please enter valid positive numbers.");
+      return;
+    }
+    setCashBalance(cashAmt);
+    setOnlineBalance(onlineAmt);
+    persist(cashAmt, onlineAmt, transactions, customCategories);
+    setAdjustOpen(false);
+    showToast("Balances updated successfully!");
+  }, [adjustCash, adjustOnline, transactions, customCategories, persist, showToast]);
+
+  const filteredAnalyticsExpenses = transactions.filter((t) => {
+    if (t.type !== "expense") return false;
+    if (analyticsFilter === "all") return true;
+    if (analyticsFilter === "cash") return (t.paymentMethod || "cash") === "cash";
+    if (analyticsFilter === "online") return t.paymentMethod === "online";
+    return true;
+  });
+
+  const expenseTotal = filteredAnalyticsExpenses.reduce((s, t) => s + t.amount, 0);
   const incomeTotal = transactions.filter((t) => t.type === "income").reduce((s, t) => s + t.amount, 0);
 
   const categoryTotals = {};
-  transactions
-    .filter((t) => t.type === "expense")
-    .forEach((t) => {
-      const key = t.categoryId || "unknown";
-      categoryTotals[key] = (categoryTotals[key] || 0) + t.amount;
-    });
+  filteredAnalyticsExpenses.forEach((t) => {
+    const key = t.categoryId || "unknown";
+    categoryTotals[key] = (categoryTotals[key] || 0) + t.amount;
+  });
+
+  const renderTransactionCard = (t, showUndo = false) => {
+    const isIncome = t.type === "income";
+    const isExpense = t.type === "expense";
+    const isTransfer = t.type === "transfer";
+
+    let iconClass = "ti-tag";
+    let iconBg = "#f5f5f5";
+    let iconColor = "#555";
+    let title = "Transaction";
+    let badgeText = "💵 Cash";
+    let badgeBg = "#f1f3f4";
+    let badgeColor = "#5f6368";
+    let amountColor = "#555";
+    let amountPrefix = "";
+
+    if (isIncome) {
+      iconClass = "ti-currency-rupee";
+      iconBg = "#E8F5E9";
+      iconColor = "#2E7D32";
+      title = "Income";
+      amountColor = "#2E7D32";
+      amountPrefix = "+";
+      const isOnline = t.paymentMethod === "online";
+      badgeText = isOnline ? "📱 UPI/Online" : "💵 Cash";
+      badgeBg = isOnline ? "#e8f0fe" : "#f1f3f4";
+      badgeColor = isOnline ? "#1a73e8" : "#5f6368";
+    } else if (isExpense) {
+      const cat = findCategory(categories, t.categoryId);
+      iconClass = cat.icon;
+      iconBg = cat.bg;
+      iconColor = cat.color;
+      title = cat.label;
+      amountColor = "#C62828";
+      amountPrefix = "−";
+      const isOnline = t.paymentMethod === "online";
+      badgeText = isOnline ? "📱 UPI/Online" : "💵 Cash";
+      badgeBg = isOnline ? "#e8f0fe" : "#f1f3f4";
+      badgeColor = isOnline ? "#1a73e8" : "#5f6368";
+    } else if (isTransfer) {
+      iconClass = "ti-arrows-exchange";
+      iconBg = "#E3F2FD";
+      iconColor = "#1565C0";
+      title = t.transferDirection === "cash_to_online" ? "Cash ➔ UPI/Online" : "UPI/Online ➔ Cash";
+      amountColor = "#1565C0";
+      amountPrefix = "⇄ ";
+      badgeText = "🔄 Transfer";
+      badgeBg = "#e8f5e9";
+      badgeColor = "#2e7d32";
+    }
+
+    return (
+      <div
+        key={t.id}
+        style={{
+          background: "#fff",
+          borderRadius: 12,
+          padding: 12,
+          display: "flex",
+          alignItems: "center",
+          gap: 10,
+          boxShadow: "0 1px 4px rgba(0,0,0,0.04)",
+        }}
+      >
+        <div
+          style={{
+            width: 40,
+            height: 40,
+            borderRadius: 10,
+            background: iconBg,
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+            color: iconColor,
+          }}
+        >
+          <i className={`ti ${iconClass}`} style={{ fontSize: 20 }} />
+        </div>
+        <div style={{ flex: 1, minWidth: 0 }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
+            <div style={{ fontWeight: 600, fontSize: 14, color: "#1e293b", textOverflow: "ellipsis", overflow: "hidden", whiteSpace: "nowrap" }}>
+              {title}
+            </div>
+            <span style={{
+              fontSize: 10,
+              padding: "2px 6px",
+              borderRadius: 6,
+              background: badgeBg,
+              color: badgeColor,
+              fontWeight: 600,
+              display: "inline-flex",
+              alignItems: "center",
+              gap: 2
+            }}>
+              {badgeText}
+            </span>
+          </div>
+          <div style={{ fontSize: 12, color: "#64748b", marginTop: 2 }}>
+            {fmtDate(t.date)}
+            {t.note ? ` · ${t.note}` : ""}
+          </div>
+        </div>
+        <div
+          style={{
+            fontWeight: 700,
+            color: amountColor,
+            fontSize: 14,
+            marginRight: showUndo ? 4 : 0,
+            whiteSpace: "nowrap"
+          }}
+        >
+          {amountPrefix}
+          {fmt(t.amount)}
+        </div>
+        {showUndo && (
+          <button
+            type="button"
+            onClick={() => deleteTransaction(t.id)}
+            style={{
+              border: "none",
+              background: "#ffebee",
+              color: "#c62828",
+              borderRadius: 8,
+              padding: "6px 10px",
+              cursor: "pointer",
+              fontSize: 12,
+              fontWeight: 600,
+              transition: "background 0.2s"
+            }}
+            onMouseOver={(e) => e.currentTarget.style.background = "#ffcdd2"}
+            onMouseOut={(e) => e.currentTarget.style.background = "#ffebee"}
+          >
+            Undo
+          </button>
+        )}
+      </div>
+    );
+  };
 
   return (
     <>
@@ -610,77 +891,52 @@ export default function App() {
               <div className="app-scroll-body">
                 {tab === "home" && (
                   <div>
+                    {/* Multi-wallet Balance Header */}
                     <div
                       style={{
-                        background: "linear-gradient(135deg, #1565C0, #42A5F5)",
-                        borderRadius: 16,
+                        background: "linear-gradient(135deg, #0b1329, #1e293b)",
+                        borderRadius: 20,
                         padding: 20,
                         color: "#fff",
                         marginBottom: 16,
-                        boxShadow: "0 8px 20px rgba(21,101,192,0.2)",
+                        boxShadow: "0 8px 30px rgba(15,23,42,0.3)",
+                        border: "1px solid rgba(255,255,255,0.08)",
+                        position: "relative"
                       }}
                     >
-                      <div style={{ fontSize: 12, opacity: 0.9 }}>Current balance</div>
-                      <div style={{ fontSize: 28, fontWeight: 800, marginTop: 4 }}>{fmt(balance)}</div>
-                      <div style={{ display: "flex", gap: 16, marginTop: 16, fontSize: 12, opacity: 0.95 }}>
-                        <span>In +{fmt(incomeTotal)}</span>
-                        <span>Out −{fmt(expenseTotal)}</span>
+                      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start" }}>
+                        <div>
+                          <div style={{ fontSize: 11, opacity: 0.7, textTransform: "uppercase", letterSpacing: "1px", fontWeight: 600 }}>Total Balance</div>
+                          <div style={{ fontSize: 32, fontWeight: 800, marginTop: 4, letterSpacing: "-0.5px" }}>{fmt(cashBalance + onlineBalance)}</div>
+                        </div>
+                      </div>
+                      
+                      <div style={{ height: "1px", background: "rgba(255,255,255,0.1)", margin: "16px 0" }} />
+                      
+                      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
+                        <div style={{ background: "rgba(255,255,255,0.04)", padding: "10px 12px", borderRadius: 12, border: "1px solid rgba(255,255,255,0.04)" }}>
+                          <div style={{ fontSize: 11, opacity: 0.7, display: "flex", alignItems: "center", gap: 4 }}>
+                            <span>💵</span> Cash in Hand
+                          </div>
+                          <div style={{ fontSize: 16, fontWeight: 700, marginTop: 2, color: "#a7f3d0" }}>{fmt(cashBalance)}</div>
+                        </div>
+                        <div style={{ background: "rgba(255,255,255,0.04)", padding: "10px 12px", borderRadius: 12, border: "1px solid rgba(255,255,255,0.04)" }}>
+                          <div style={{ fontSize: 11, opacity: 0.7, display: "flex", alignItems: "center", gap: 4 }}>
+                            <span>📱</span> UPI / Digital
+                          </div>
+                          <div style={{ fontSize: 16, fontWeight: 700, marginTop: 2, color: "#93c5fd" }}>{fmt(onlineBalance)}</div>
+                        </div>
+                      </div>
+                      
+                      <div style={{ display: "flex", gap: 16, fontSize: 11, opacity: 0.8, marginTop: 14 }}>
+                        <span>In: <strong style={{ color: "#34d399" }}>+{fmt(incomeTotal)}</strong></span>
+                        <span>Out: <strong style={{ color: "#f87171" }}>−{fmt(expenseTotal)}</strong></span>
                       </div>
                     </div>
                     
                     <div style={{ fontWeight: 700, marginBottom: 8, color: "#333", fontSize: 15 }}>Recent</div>
                     <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-                      {transactions.slice(0, 6).map((t) => {
-                        const cat = t.type === "expense" ? findCategory(categories, t.categoryId) : null;
-                        return (
-                          <div
-                            key={t.id}
-                            style={{
-                              background: "#fff",
-                              borderRadius: 12,
-                              padding: 12,
-                              display: "flex",
-                              alignItems: "center",
-                              gap: 10,
-                              boxShadow: "0 1px 4px rgba(0,0,0,0.04)",
-                            }}
-                          >
-                            <div
-                              style={{
-                                width: 40,
-                                height: 40,
-                                borderRadius: 10,
-                                background: t.type === "income" ? "#E8F5E9" : cat.bg,
-                                display: "flex",
-                                alignItems: "center",
-                                justifyContent: "center",
-                                color: t.type === "income" ? "#2E7D32" : cat.color,
-                              }}
-                            >
-                              <i className={`ti ${t.type === "income" ? "ti-currency-rupee" : cat.icon}`} />
-                            </div>
-                            <div style={{ flex: 1, minWidth: 0 }}>
-                              <div style={{ fontWeight: 600, fontSize: 14 }}>
-                                {t.type === "income" ? "Income" : cat.label}
-                              </div>
-                              <div style={{ fontSize: 12, color: "#888" }}>
-                                {fmtDate(t.date)}
-                                {t.note ? ` · ${t.note}` : ""}
-                              </div>
-                            </div>
-                            <div
-                              style={{
-                                fontWeight: 700,
-                                color: t.type === "income" ? "#2E7D32" : "#C62828",
-                                fontSize: 14,
-                              }}
-                            >
-                              {t.type === "income" ? "+" : "−"}
-                              {fmt(t.amount)}
-                            </div>
-                          </div>
-                        );
-                      })}
+                      {transactions.slice(0, 6).map((t) => renderTransactionCard(t))}
                       {transactions.length === 0 && (
                         <div style={{ textAlign: "center", color: "#999", padding: 24, fontSize: 13 }}>No transactions yet.</div>
                       )}
@@ -691,6 +947,58 @@ export default function App() {
                 {tab === "analytics" && (
                   <div>
                     <div style={{ fontWeight: 700, marginBottom: 12, color: "#333", fontSize: 15 }}>Spending by category</div>
+                    
+                    {/* Analytics Filter Pills */}
+                    <div style={{ display: "flex", gap: 8, marginBottom: 16 }}>
+                      <button
+                        onClick={() => setAnalyticsFilter("all")}
+                        style={{
+                          padding: "6px 12px",
+                          borderRadius: 20,
+                          border: "none",
+                          background: analyticsFilter === "all" ? "#1565C0" : "#fff",
+                          color: analyticsFilter === "all" ? "#fff" : "#64748b",
+                          fontWeight: 600,
+                          fontSize: 12,
+                          cursor: "pointer",
+                          boxShadow: "0 1px 3px rgba(0,0,0,0.05)"
+                        }}
+                      >
+                        All
+                      </button>
+                      <button
+                        onClick={() => setAnalyticsFilter("cash")}
+                        style={{
+                          padding: "6px 12px",
+                          borderRadius: 20,
+                          border: "none",
+                          background: analyticsFilter === "cash" ? "#2e7d32" : "#fff",
+                          color: analyticsFilter === "cash" ? "#fff" : "#64748b",
+                          fontWeight: 600,
+                          fontSize: 12,
+                          cursor: "pointer",
+                          boxShadow: "0 1px 3px rgba(0,0,0,0.05)"
+                        }}
+                      >
+                        💵 Cash
+                      </button>
+                      <button
+                        onClick={() => setAnalyticsFilter("online")}
+                        style={{
+                          padding: "6px 12px",
+                          borderRadius: 20,
+                          border: "none",
+                          background: analyticsFilter === "online" ? "#1565C0" : "#fff",
+                          color: analyticsFilter === "online" ? "#fff" : "#64748b",
+                          fontWeight: 600,
+                          fontSize: 12,
+                          cursor: "pointer",
+                          boxShadow: "0 1px 3px rgba(0,0,0,0.05)"
+                        }}
+                      >
+                        📱 Online
+                      </button>
+                    </div>
                     {Object.keys(categoryTotals).length === 0 && (
                       <div style={{ textAlign: "center", color: "#999", padding: 24, fontSize: 13 }}>No expenses to analyze.</div>
                     )}
@@ -735,70 +1043,85 @@ export default function App() {
                 
                 {tab === "history" && (
                   <div>
-                    <div style={{ fontWeight: 700, marginBottom: 12, color: "#333", fontSize: 15 }}>All transactions</div>
+                    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12 }}>
+                      <div style={{ fontWeight: 700, color: "#333", fontSize: 15 }}>All transactions</div>
+                    </div>
+                    
+                    {/* History Filter Pills */}
+                    <div style={{ display: "flex", gap: 8, marginBottom: 16 }}>
+                      <button
+                        onClick={() => setHistoryFilter("all")}
+                        style={{
+                          padding: "6px 12px",
+                          borderRadius: 20,
+                          border: "none",
+                          background: historyFilter === "all" ? "#1565C0" : "#fff",
+                          color: historyFilter === "all" ? "#fff" : "#64748b",
+                          fontWeight: 600,
+                          fontSize: 12,
+                          cursor: "pointer",
+                          boxShadow: "0 1px 3px rgba(0,0,0,0.05)"
+                        }}
+                      >
+                        All ({transactions.length})
+                      </button>
+                      <button
+                        onClick={() => setHistoryFilter("cash")}
+                        style={{
+                          padding: "6px 12px",
+                          borderRadius: 20,
+                          border: "none",
+                          background: historyFilter === "cash" ? "#2e7d32" : "#fff",
+                          color: historyFilter === "cash" ? "#fff" : "#64748b",
+                          fontWeight: 600,
+                          fontSize: 12,
+                          cursor: "pointer",
+                          boxShadow: "0 1px 3px rgba(0,0,0,0.05)"
+                        }}
+                      >
+                        💵 Cash ({transactions.filter(t => t.type === "transfer" || (t.paymentMethod || "cash") === "cash").length})
+                      </button>
+                      <button
+                        onClick={() => setHistoryFilter("online")}
+                        style={{
+                          padding: "6px 12px",
+                          borderRadius: 20,
+                          border: "none",
+                          background: historyFilter === "online" ? "#1565C0" : "#fff",
+                          color: historyFilter === "online" ? "#fff" : "#64748b",
+                          fontWeight: 600,
+                          fontSize: 12,
+                          cursor: "pointer",
+                          boxShadow: "0 1px 3px rgba(0,0,0,0.05)"
+                        }}
+                      >
+                        📱 Online ({transactions.filter(t => t.type === "transfer" || t.paymentMethod === "online").length})
+                      </button>
+                    </div>
+
                     <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-                      {transactions.map((t) => {
-                        const cat = t.type === "expense" ? findCategory(categories, t.categoryId) : null;
-                        return (
-                          <div
-                            key={t.id}
-                            style={{
-                              background: "#fff",
-                              borderRadius: 12,
-                              padding: 12,
-                              display: "flex",
-                              alignItems: "center",
-                              gap: 10,
-                              boxShadow: "0 1px 4px rgba(0,0,0,0.04)",
-                            }}
-                          >
-                            <div
-                              style={{
-                                width: 40,
-                                height: 40,
-                                borderRadius: 10,
-                                background: t.type === "income" ? "#E8F5E9" : cat.bg,
-                                display: "flex",
-                                alignItems: "center",
-                                justifycontent: "center",
-                                color: t.type === "income" ? "#2E7D32" : cat.color,
-                              }}
-                            >
-                              <i className={`ti ${t.type === "income" ? "ti-currency-rupee" : cat.icon}`} />
-                            </div>
-                            <div style={{ flex: 1, minWidth: 0 }}>
-                              <div style={{ fontWeight: 600, fontSize: 14 }}>
-                                {t.type === "income" ? "Income" : cat.label}
-                              </div>
-                              <div style={{ fontSize: 12, color: "#888" }}>
-                                {fmtDate(t.date)}
-                                {t.note ? ` · ${t.note}` : ""}
-                              </div>
-                            </div>
-                            <div style={{ fontWeight: 700, color: t.type === "income" ? "#2E7D32" : "#C62828", fontSize: 14, marginRight: 4 }}>
-                              {t.type === "income" ? "+" : "−"}
-                              {fmt(t.amount)}
-                            </div>
-                            <button
-                              type="button"
-                              onClick={() => deleteTransaction(t.id)}
-                              style={{
-                                border: "none",
-                                background: "#ffebee",
-                                color: "#c62828",
-                                borderRadius: 8,
-                                padding: "6px 10px",
-                                cursor: "pointer",
-                                fontSize: 12,
-                                fontWeight: 600,
-                              }}
-                            >
-                              Undo
-                            </button>
-                          </div>
-                        );
-                      })}
-                      {transactions.length === 0 && (
+                      {transactions
+                        .filter((t) => {
+                          if (historyFilter === "all") return true;
+                          if (historyFilter === "cash") {
+                            return t.type === "transfer" || (t.paymentMethod || "cash") === "cash";
+                          }
+                          if (historyFilter === "online") {
+                            return t.type === "transfer" || t.paymentMethod === "online";
+                          }
+                          return true;
+                        })
+                        .map((t) => renderTransactionCard(t, true))}
+                      {transactions.filter((t) => {
+                        if (historyFilter === "all") return true;
+                        if (historyFilter === "cash") {
+                          return t.type === "transfer" || (t.paymentMethod || "cash") === "cash";
+                        }
+                        if (historyFilter === "online") {
+                          return t.type === "transfer" || t.paymentMethod === "online";
+                        }
+                        return true;
+                      }).length === 0 && (
                         <div style={{ textAlign: "center", color: "#999", padding: 24, fontSize: 13 }}>No history.</div>
                       )}
                     </div>
@@ -885,15 +1208,16 @@ export default function App() {
                   <h3 style={{ margin: 0, fontSize: 18, fontWeight: 700, color: "#1e293b" }}>Add Transaction</h3>
                   <button onClick={() => setAddMenuOpen(false)} style={{ border: "none", background: "none", fontSize: 24, cursor: "pointer", color: "#64748b" }}>×</button>
                 </div>
-                <div style={{ display: "flex", gap: 16 }}>
+                <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
                   <button
                     onClick={() => {
                       setAddMenuOpen(false);
                       setIncomeOpen(true);
+                      setIncomePaymentMethod("cash");
                     }}
                     style={{
-                      flex: 1,
-                      padding: "16px",
+                      width: "100%",
+                      padding: "14px 16px",
                       borderRadius: 16,
                       border: "none",
                       background: "#E8F5E9",
@@ -902,22 +1226,24 @@ export default function App() {
                       fontSize: 15,
                       cursor: "pointer",
                       display: "flex",
-                      flexDirection: "column",
                       alignItems: "center",
-                      gap: 8,
+                      gap: 12,
+                      transition: "transform 0.1s"
                     }}
                   >
-                    <i className="ti ti-plus" style={{ fontSize: 24 }} />
-                    Add Income
+                    <i className="ti ti-plus" style={{ fontSize: 20 }} />
+                    <span style={{ flex: 1, textAlign: "left" }}>Add Income</span>
+                    <span style={{ fontSize: 12, opacity: 0.8, fontWeight: 500 }}>Deposit / Earnings</span>
                   </button>
                   <button
                     onClick={() => {
                       setAddMenuOpen(false);
                       openExpense();
+                      setExpensePaymentMethod("cash");
                     }}
                     style={{
-                      flex: 1,
-                      padding: "16px",
+                      width: "100%",
+                      padding: "14px 16px",
                       borderRadius: 16,
                       border: "none",
                       background: "#FFEBEE",
@@ -926,13 +1252,40 @@ export default function App() {
                       fontSize: 15,
                       cursor: "pointer",
                       display: "flex",
-                      flexDirection: "column",
                       alignItems: "center",
-                      gap: 8,
+                      gap: 12,
+                      transition: "transform 0.1s"
                     }}
                   >
-                    <i className="ti ti-minus" style={{ fontSize: 24 }} />
-                    Add Expense
+                    <i className="ti ti-minus" style={{ fontSize: 20 }} />
+                    <span style={{ flex: 1, textAlign: "left" }}>Add Expense</span>
+                    <span style={{ fontSize: 12, opacity: 0.8, fontWeight: 500 }}>Payments / Spending</span>
+                  </button>
+                  <button
+                    onClick={() => {
+                      setAddMenuOpen(false);
+                      setTransferOpen(true);
+                      setTransferDirection("cash_to_online");
+                    }}
+                    style={{
+                      width: "100%",
+                      padding: "14px 16px",
+                      borderRadius: 16,
+                      border: "none",
+                      background: "#E3F2FD",
+                      color: "#1565C0",
+                      fontWeight: 700,
+                      fontSize: 15,
+                      cursor: "pointer",
+                      display: "flex",
+                      alignItems: "center",
+                      gap: 12,
+                      transition: "transform 0.1s"
+                    }}
+                  >
+                    <i className="ti ti-arrows-exchange" style={{ fontSize: 20 }} />
+                    <span style={{ flex: 1, textAlign: "left" }}>Transfer Money</span>
+                    <span style={{ fontSize: 12, opacity: 0.8, fontWeight: 500 }}>Cash ⇄ Bank/UPI</span>
                   </button>
                 </div>
               </div>
@@ -966,6 +1319,52 @@ export default function App() {
                     boxSizing: "border-box",
                   }}
                 />
+                
+                <label style={{ fontSize: 13, fontWeight: 600, color: "#555", display: "block", marginBottom: 6 }}>Payment Method</label>
+                <div style={{ display: "flex", gap: 10, marginBottom: 16 }}>
+                  <button
+                    type="button"
+                    onClick={() => setExpensePaymentMethod("cash")}
+                    style={{
+                      flex: 1,
+                      padding: "12px",
+                      borderRadius: 12,
+                      border: expensePaymentMethod === "cash" ? "2px solid #2e7d32" : "1px solid #ddd",
+                      background: expensePaymentMethod === "cash" ? "#E8F5E9" : "#fff",
+                      color: expensePaymentMethod === "cash" ? "#2e7d32" : "#555",
+                      fontWeight: 600,
+                      cursor: "pointer",
+                      display: "flex",
+                      alignItems: "center",
+                      justifyContent: "center",
+                      gap: 8,
+                      transition: "all 0.2s"
+                    }}
+                  >
+                    <span>💵</span> Cash in Hand
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setExpensePaymentMethod("online")}
+                    style={{
+                      flex: 1,
+                      padding: "12px",
+                      borderRadius: 12,
+                      border: expensePaymentMethod === "online" ? "2px solid #1565C0" : "1px solid #ddd",
+                      background: expensePaymentMethod === "online" ? "#E3F2FD" : "#fff",
+                      color: expensePaymentMethod === "online" ? "#1565C0" : "#555",
+                      fontWeight: 600,
+                      cursor: "pointer",
+                      display: "flex",
+                      alignItems: "center",
+                      justifyContent: "center",
+                      gap: 8,
+                      transition: "all 0.2s"
+                    }}
+                  >
+                    <span>📱</span> UPI / Digital
+                  </button>
+                </div>
                 
                 <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
                   <span style={{ fontSize: 13, fontWeight: 600, color: "#555" }}>Category</span>
@@ -1145,6 +1544,51 @@ export default function App() {
                     boxSizing: "border-box",
                   }}
                 />
+                <label style={{ fontSize: 13, fontWeight: 600, color: "#555", display: "block", marginBottom: 6 }}>Deposit To</label>
+                <div style={{ display: "flex", gap: 10, marginBottom: 16 }}>
+                  <button
+                    type="button"
+                    onClick={() => setIncomePaymentMethod("cash")}
+                    style={{
+                      flex: 1,
+                      padding: "12px",
+                      borderRadius: 12,
+                      border: incomePaymentMethod === "cash" ? "2px solid #2e7d32" : "1px solid #ddd",
+                      background: incomePaymentMethod === "cash" ? "#E8F5E9" : "#fff",
+                      color: incomePaymentMethod === "cash" ? "#2e7d32" : "#555",
+                      fontWeight: 600,
+                      cursor: "pointer",
+                      display: "flex",
+                      alignItems: "center",
+                      justifyContent: "center",
+                      gap: 8,
+                      transition: "all 0.2s"
+                    }}
+                  >
+                    <span>💵</span> Cash in Hand
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setIncomePaymentMethod("online")}
+                    style={{
+                      flex: 1,
+                      padding: "12px",
+                      borderRadius: 12,
+                      border: incomePaymentMethod === "online" ? "2px solid #1565C0" : "1px solid #ddd",
+                      background: incomePaymentMethod === "online" ? "#E3F2FD" : "#fff",
+                      color: incomePaymentMethod === "online" ? "#1565C0" : "#555",
+                      fontWeight: 600,
+                      cursor: "pointer",
+                      display: "flex",
+                      alignItems: "center",
+                      justifyContent: "center",
+                      gap: 8,
+                      transition: "all 0.2s"
+                    }}
+                  >
+                    <span>📱</span> UPI / Digital
+                  </button>
+                </div>
                 <label style={{ fontSize: 13, fontWeight: 600, color: "#555" }}>Note (optional)</label>
                 <input
                   type="text"
@@ -1176,6 +1620,197 @@ export default function App() {
                   }}
                 >
                   Save income
+                </button>
+              </div>
+            </div>
+          )}
+
+          {adjustOpen && (
+            <div className="bottom-sheet-backdrop" onClick={() => setAdjustOpen(false)}>
+              <div className="bottom-sheet" onClick={(e) => e.stopPropagation()}>
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 16 }}>
+                  <h2 style={{ margin: 0, fontSize: 20, fontWeight: 700, color: "#1e293b" }}>Adjust Balances</h2>
+                  <button type="button" onClick={() => setAdjustOpen(false)} style={{ border: "none", background: "none", fontSize: 22, cursor: "pointer", color: "#64748b" }}>
+                    ×
+                  </button>
+                </div>
+                
+                <div style={{ marginBottom: 16 }}>
+                  <label style={{ fontSize: 13, fontWeight: 600, color: "#475569", display: "block", marginBottom: 6 }}>Cash in Hand 💵</label>
+                  <input
+                    type="number"
+                    inputMode="decimal"
+                    placeholder="0.00"
+                    value={adjustCash}
+                    onChange={(e) => setAdjustCash(e.target.value)}
+                    style={{
+                      width: "100%",
+                      padding: 12,
+                      fontSize: 16,
+                      borderRadius: 12,
+                      border: "1px solid #cbd5e1",
+                      boxSizing: "border-box",
+                    }}
+                  />
+                </div>
+
+                <div style={{ marginBottom: 20 }}>
+                  <label style={{ fontSize: 13, fontWeight: 600, color: "#475569", display: "block", marginBottom: 6 }}>UPI / Online Banking 📱</label>
+                  <input
+                    type="number"
+                    inputMode="decimal"
+                    placeholder="0.00"
+                    value={adjustOnline}
+                    onChange={(e) => setAdjustOnline(e.target.value)}
+                    style={{
+                      width: "100%",
+                      padding: 12,
+                      fontSize: 16,
+                      borderRadius: 12,
+                      border: "1px solid #cbd5e1",
+                      boxSizing: "border-box",
+                    }}
+                  />
+                </div>
+
+                <button
+                  type="button"
+                  onClick={saveAdjustBalances}
+                  style={{
+                    width: "100%",
+                    padding: 14,
+                    borderRadius: 14,
+                    border: "none",
+                    background: "#0f172a",
+                    color: "#fff",
+                    fontWeight: 700,
+                    fontSize: 16,
+                    cursor: "pointer",
+                  }}
+                >
+                  Save Balances
+                </button>
+              </div>
+            </div>
+          )}
+
+          {transferOpen && (
+            <div className="bottom-sheet-backdrop" onClick={() => setTransferOpen(false)}>
+              <div className="bottom-sheet" onClick={(e) => e.stopPropagation()}>
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 16 }}>
+                  <h2 style={{ margin: 0, fontSize: 20, fontWeight: 700, color: "#1e293b" }}>Transfer Money</h2>
+                  <button type="button" onClick={() => setTransferOpen(false)} style={{ border: "none", background: "none", fontSize: 22, cursor: "pointer", color: "#64748b" }}>
+                    ×
+                  </button>
+                </div>
+                
+                <label style={{ fontSize: 13, fontWeight: 600, color: "#475569", display: "block", marginBottom: 6 }}>Direction</label>
+                <div style={{ display: "flex", gap: 10, marginBottom: 16 }}>
+                  <button
+                    type="button"
+                    onClick={() => setTransferDirection("cash_to_online")}
+                    style={{
+                      flex: 1,
+                      padding: "12px 10px",
+                      borderRadius: 12,
+                      border: transferDirection === "cash_to_online" ? "2px solid #1565C0" : "1px solid #ddd",
+                      background: transferDirection === "cash_to_online" ? "#E3F2FD" : "#fff",
+                      color: transferDirection === "cash_to_online" ? "#1565C0" : "#555",
+                      fontWeight: 600,
+                      cursor: "pointer",
+                      display: "flex",
+                      flexDirection: "column",
+                      alignItems: "center",
+                      gap: 4,
+                      fontSize: 13,
+                      transition: "all 0.2s"
+                    }}
+                  >
+                    <span>💵 ➔ 📱</span>
+                    <span>Cash to UPI</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setTransferDirection("online_to_cash")}
+                    style={{
+                      flex: 1,
+                      padding: "12px 10px",
+                      borderRadius: 12,
+                      border: transferDirection === "online_to_cash" ? "2px solid #2e7d32" : "1px solid #ddd",
+                      background: transferDirection === "online_to_cash" ? "#E8F5E9" : "#fff",
+                      color: transferDirection === "online_to_cash" ? "#2e7d32" : "#555",
+                      fontWeight: 600,
+                      cursor: "pointer",
+                      display: "flex",
+                      flexDirection: "column",
+                      alignItems: "center",
+                      gap: 4,
+                      fontSize: 13,
+                      transition: "all 0.2s"
+                    }}
+                  >
+                    <span>📱 ➔ 💵</span>
+                    <span>UPI to Cash</span>
+                  </button>
+                </div>
+
+                <div style={{ marginBottom: 16 }}>
+                  <label style={{ fontSize: 13, fontWeight: 600, color: "#475569", display: "block", marginBottom: 6 }}>Amount</label>
+                  <input
+                    type="number"
+                    inputMode="decimal"
+                    placeholder="0.00"
+                    value={transferAmount}
+                    onChange={(e) => setTransferAmount(e.target.value)}
+                    style={{
+                      width: "100%",
+                      padding: 12,
+                      fontSize: 18,
+                      borderRadius: 12,
+                      border: "1px solid #cbd5e1",
+                      boxSizing: "border-box",
+                    }}
+                  />
+                  <div style={{ fontSize: 11, color: "#64748b", marginTop: 4 }}>
+                    Max available: {fmt(transferDirection === "cash_to_online" ? cashBalance : onlineBalance)}
+                  </div>
+                </div>
+
+                <div style={{ marginBottom: 20 }}>
+                  <label style={{ fontSize: 13, fontWeight: 600, color: "#475569", display: "block", marginBottom: 6 }}>Note (optional)</label>
+                  <input
+                    type="text"
+                    placeholder="e.g. ATM withdrawal"
+                    value={transferNote}
+                    onChange={(e) => setTransferNote(e.target.value)}
+                    style={{
+                      width: "100%",
+                      padding: 12,
+                      borderRadius: 12,
+                      border: "1px solid #cbd5e1",
+                      boxSizing: "border-box",
+                    }}
+                  />
+                </div>
+
+                <button
+                  type="button"
+                  onClick={addTransfer}
+                  style={{
+                    width: "100%",
+                    padding: 14,
+                    borderRadius: 14,
+                    border: "none",
+                    background: transferDirection === "cash_to_online" ? "#1565C0" : "#2e7d32",
+                    color: "#fff",
+                    fontWeight: 700,
+                    fontSize: 16,
+                    cursor: "pointer",
+                    boxShadow: "0 4px 12px rgba(0,0,0,0.1)",
+                    transition: "background 0.2s"
+                  }}
+                >
+                  Confirm Transfer
                 </button>
               </div>
             </div>
