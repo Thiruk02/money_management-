@@ -1,71 +1,108 @@
-const CACHE_NAME = 'money-mgr-cache-v1';
-const PRE_CACHE = [
+// ─── Cache versioning — bump this whenever assets change ───────────────────────
+const CACHE_VERSION = 'v2';
+const STATIC_CACHE  = `money-mgr-static-${CACHE_VERSION}`;
+const DYNAMIC_CACHE = `money-mgr-dynamic-${CACHE_VERSION}`;
+
+// Shell assets to pre-cache on install
+const PRECACHE_ASSETS = [
   './',
   './index.html',
+  './offline.html',
   './manifest.json',
-  './icon.png'
+  './icon.png',
+  './icon-192.png',
 ];
 
-// On install, pre-cache main routes
+// ─── Install: cache shell ───────────────────────────────────────────────────────
 self.addEventListener('install', (event) => {
   event.waitUntil(
-    caches.open(CACHE_NAME).then((cache) => {
-      return cache.addAll(PRE_CACHE);
-    })
+    caches.open(STATIC_CACHE).then((cache) =>
+      cache.addAll(PRECACHE_ASSETS).catch(() => {
+        // Some assets may not exist yet (e.g. icon-192.png), don't fail hard
+      })
+    )
   );
-  self.skipWaiting();
+  self.skipWaiting(); // Activate new SW immediately
 });
 
-// Clean up old caches on activation
+// ─── Activate: purge stale caches ──────────────────────────────────────────────
 self.addEventListener('activate', (event) => {
+  const validCaches = [STATIC_CACHE, DYNAMIC_CACHE];
   event.waitUntil(
-    caches.keys().then((cacheNames) => {
-      return Promise.all(
-        cacheNames.map((cacheName) => {
-          if (cacheName !== CACHE_NAME) {
-            return caches.delete(cacheName);
-          }
-        })
-      );
-    })
+    caches.keys().then((keys) =>
+      Promise.all(
+        keys
+          .filter((key) => !validCaches.includes(key))
+          .map((key) => caches.delete(key))
+      )
+    ).then(() => self.clients.claim())
   );
-  self.clients.claim();
 });
 
-// Dynamic stale-while-revalidate fetching
+// ─── Fetch: Cache-first for static, Network-first for navigation ───────────────
 self.addEventListener('fetch', (event) => {
-  // Only cache GET requests from our origin
-  if (event.request.method !== 'GET' || !event.request.url.startsWith(self.location.origin)) {
+  const { request } = event;
+
+  // Only handle GET requests from same origin
+  if (request.method !== 'GET' || !request.url.startsWith(self.location.origin)) {
     return;
   }
 
-  event.respondWith(
-    caches.match(event.request).then((cachedResponse) => {
-      if (cachedResponse) {
-        // Return cached resource, but fetch update in the background
-        fetch(event.request)
-          .then((networkResponse) => {
-            if (networkResponse.status === 200) {
-              caches.open(CACHE_NAME).then((cache) => {
-                cache.put(event.request, networkResponse);
-              });
-            }
-          })
-          .catch(() => { /* Silent failure if offline */ });
-        return cachedResponse;
-      }
+  const url = new URL(request.url);
 
-      // Fetch from network if not cached
-      return fetch(event.request).then((networkResponse) => {
-        if (!networkResponse || networkResponse.status !== 200 || networkResponse.type !== 'basic') {
-          return networkResponse;
-        }
-        const responseToCache = networkResponse.clone();
-        caches.open(CACHE_NAME).then((cache) => {
-          cache.put(event.request, responseToCache);
+  // Navigation requests → network first, fallback to cached index, then offline page
+  if (request.mode === 'navigate') {
+    event.respondWith(
+      fetch(request)
+        .then((res) => {
+          const clone = res.clone();
+          caches.open(DYNAMIC_CACHE).then((cache) => cache.put(request, clone));
+          return res;
+        })
+        .catch(() =>
+          caches.match('./index.html')
+            .then((cached) => cached || caches.match('./offline.html'))
+        )
+    );
+    return;
+  }
+
+  // JS/CSS assets with hashed names → cache-first (they never change)
+  if (url.pathname.startsWith('/assets/') || url.pathname.match(/\.(js|css|woff2?)$/)) {
+    event.respondWith(
+      caches.match(request).then((cached) => {
+        if (cached) return cached;
+        return fetch(request).then((res) => {
+          const clone = res.clone();
+          caches.open(STATIC_CACHE).then((cache) => cache.put(request, clone));
+          return res;
         });
-        return networkResponse;
-      });
+      })
+    );
+    return;
+  }
+
+  // Everything else → stale-while-revalidate
+  event.respondWith(
+    caches.match(request).then((cached) => {
+      const networkFetch = fetch(request)
+        .then((res) => {
+          if (res.status === 200) {
+            const clone = res.clone();
+            caches.open(DYNAMIC_CACHE).then((cache) => cache.put(request, clone));
+          }
+          return res;
+        })
+        .catch(() => cached); // Return cached if network fails
+
+      return cached || networkFetch;
     })
   );
+});
+
+// ─── Message: Force skip waiting from app ──────────────────────────────────────
+self.addEventListener('message', (event) => {
+  if (event.data && event.data.type === 'SKIP_WAITING') {
+    self.skipWaiting();
+  }
 });

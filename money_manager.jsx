@@ -240,8 +240,9 @@ export default function App() {
   const [newCategoryName, setNewCategoryName] = useState("");
 
   // Payment Method toggles
-  const [expensePaymentMethod, setExpensePaymentMethod] = useState("cash"); // 'cash' or 'online'
+  const [expensePaymentMethod, setExpensePaymentMethod] = useState("cash"); // 'cash', 'online', 'split'
   const [incomePaymentMethod, setIncomePaymentMethod] = useState("cash");   // 'cash' or 'online'
+  const [splitCashAmount, setSplitCashAmount] = useState("");
 
   // Transfer states
   const [transferOpen, setTransferOpen] = useState(false);
@@ -261,6 +262,11 @@ export default function App() {
   const [toast, setToast] = useState(null);
   const toastTimer = useRef(null);
 
+  // PWA states
+  const [deferredPrompt, setDeferredPrompt] = useState(null);
+  const [showInstallPrompt, setShowInstallPrompt] = useState(false);
+  const [swUpdate, setSwUpdate] = useState(null);
+
   const showToast = useCallback((msg) => {
     if (toastTimer.current) clearTimeout(toastTimer.current);
     setToast(msg);
@@ -278,7 +284,42 @@ export default function App() {
       setCustomCategories(d.customCategories);
     }
     setHydrated(true);
+
+    const handleBeforeInstallPrompt = (e) => {
+      e.preventDefault();
+      setDeferredPrompt(e);
+      setShowInstallPrompt(true);
+    };
+    window.addEventListener("beforeinstallprompt", handleBeforeInstallPrompt);
+
+    const handleSwUpdate = (e) => {
+      setSwUpdate(e.detail);
+    };
+    window.addEventListener("sw-update-available", handleSwUpdate);
+
+    return () => {
+      window.removeEventListener("beforeinstallprompt", handleBeforeInstallPrompt);
+      window.removeEventListener("sw-update-available", handleSwUpdate);
+    };
   }, []);
+
+  const handleInstallClick = async () => {
+    if (deferredPrompt) {
+      deferredPrompt.prompt();
+      const { outcome } = await deferredPrompt.userChoice;
+      if (outcome === "accepted") {
+        setShowInstallPrompt(false);
+      }
+      setDeferredPrompt(null);
+    }
+  };
+
+  const handleUpdateClick = () => {
+    if (swUpdate && swUpdate.waiting) {
+      swUpdate.waiting.postMessage({ type: "SKIP_WAITING" });
+    }
+    setSwUpdate(null);
+  };
 
   const categories = allCategories(customCategories);
 
@@ -325,6 +366,9 @@ export default function App() {
 
   const openExpense = useCallback(() => {
     setExpenseCategoryId((id) => id || DEFAULT_CATEGORIES[0]?.id || "");
+    setExpenseAmount("");
+    setSplitCashAmount("");
+    setExpensePaymentMethod("cash");
     setExpenseOpen(true);
   }, []);
 
@@ -334,11 +378,38 @@ export default function App() {
       showToast("Enter a valid amount.");
       return;
     }
-    const currentBal = expensePaymentMethod === "cash" ? cashBalance : onlineBalance;
-    if (amt > currentBal) {
-      showToast(`Insufficient funds in ${expensePaymentMethod === "cash" ? "Cash in Hand" : "UPI/Banking"}.`);
+    
+    let nextCash = cashBalance;
+    let nextOnline = onlineBalance;
+    let cashDeduction = 0;
+    let onlineDeduction = 0;
+
+    if (expensePaymentMethod === "cash") {
+      cashDeduction = amt;
+    } else if (expensePaymentMethod === "online") {
+      onlineDeduction = amt;
+    } else if (expensePaymentMethod === "split") {
+      const parsedSplitCash = parseFloat(splitCashAmount);
+      if (!Number.isFinite(parsedSplitCash) || parsedSplitCash < 0 || parsedSplitCash > amt) {
+        showToast("Enter a valid cash amount for split payment.");
+        return;
+      }
+      cashDeduction = parsedSplitCash;
+      onlineDeduction = amt - cashDeduction;
+    }
+
+    if (cashDeduction > nextCash) {
+      showToast("Insufficient funds in Cash in Hand.");
       return;
     }
+    if (onlineDeduction > nextOnline) {
+      showToast("Insufficient funds in UPI/Banking.");
+      return;
+    }
+
+    nextCash -= cashDeduction;
+    nextOnline -= onlineDeduction;
+
     const tx = {
       id: `tx_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
       type: "expense",
@@ -346,25 +417,21 @@ export default function App() {
       categoryId: expenseCategoryId,
       note: expenseNote.trim(),
       paymentMethod: expensePaymentMethod,
+      splitCash: expensePaymentMethod === "split" ? cashDeduction : undefined,
+      splitOnline: expensePaymentMethod === "split" ? onlineDeduction : undefined,
       date: new Date().toISOString(),
     };
-    let nextCash = cashBalance;
-    let nextOnline = onlineBalance;
-    if (expensePaymentMethod === "cash") {
-      nextCash -= amt;
-    } else {
-      nextOnline -= amt;
-    }
     const nextTx = [tx, ...transactions];
     setCashBalance(nextCash);
     setOnlineBalance(nextOnline);
     setTransactions(nextTx);
     persist(nextCash, nextOnline, nextTx, customCategories);
     setExpenseAmount("");
+    setSplitCashAmount("");
     setExpenseNote("");
     setExpenseOpen(false);
-    showToast(`Expense ${fmt(amt)} saved via ${expensePaymentMethod === "cash" ? "Cash" : "UPI/Online"}`);
-  }, [user, expenseAmount, expenseCategoryId, expenseNote, expensePaymentMethod, cashBalance, onlineBalance, transactions, customCategories, persist, showToast]);
+    showToast(`Expense ${fmt(amt)} saved via ${expensePaymentMethod === "split" ? "Split Payment" : expensePaymentMethod === "cash" ? "Cash" : "UPI/Online"}`);
+  }, [user, expenseAmount, expenseCategoryId, expenseNote, expensePaymentMethod, splitCashAmount, cashBalance, onlineBalance, transactions, customCategories, persist, showToast]);
 
   const addIncome = useCallback(() => {
     const amt = parseFloat(incomeAmount);
@@ -567,10 +634,16 @@ export default function App() {
       title = cat.label;
       amountColor = "#C62828";
       amountPrefix = "−";
-      const isOnline = t.paymentMethod === "online";
-      badgeText = isOnline ? "📱 UPI/Online" : "💵 Cash";
-      badgeBg = isOnline ? "#e8f0fe" : "#f1f3f4";
-      badgeColor = isOnline ? "#1a73e8" : "#5f6368";
+      if (t.paymentMethod === "split") {
+        badgeText = "⚖️ Split";
+        badgeBg = "#f3e8ff";
+        badgeColor = "#7e22ce";
+      } else {
+        const isOnline = t.paymentMethod === "online";
+        badgeText = isOnline ? "📱 UPI/Online" : "💵 Cash";
+        badgeBg = isOnline ? "#e8f0fe" : "#f1f3f4";
+        badgeColor = isOnline ? "#1a73e8" : "#5f6368";
+      }
     } else if (isTransfer) {
       iconClass = "ti-arrows-exchange";
       iconBg = "#E3F2FD";
@@ -633,6 +706,11 @@ export default function App() {
             {fmtDate(t.date)}
             {t.note ? ` · ${t.note}` : ""}
           </div>
+          {t.paymentMethod === "split" && (
+            <div style={{ fontSize: 11, color: "#94a3b8", marginTop: 2 }}>
+              Split: {fmt(t.splitCash)} Cash • {fmt(t.splitOnline)} UPI
+            </div>
+          )}
         </div>
         <div
           style={{
@@ -888,6 +966,23 @@ export default function App() {
                 </div>
               </header>
               
+              {showInstallPrompt && (
+                <div style={{ background: "#E3F2FD", padding: "10px 16px", display: "flex", justifyContent: "space-between", alignItems: "center", borderBottom: "1px solid #BBDEFB" }}>
+                  <div style={{ fontSize: 13, color: "#1565C0", fontWeight: 600 }}>Install Money Manager App</div>
+                  <div style={{ display: "flex", gap: 8 }}>
+                    <button onClick={() => setShowInstallPrompt(false)} style={{ background: "transparent", border: "none", color: "#64748b", fontSize: 12, fontWeight: 600, cursor: "pointer" }}>Later</button>
+                    <button onClick={handleInstallClick} style={{ background: "#1565C0", border: "none", color: "#fff", padding: "6px 12px", borderRadius: 8, fontSize: 12, fontWeight: 700, cursor: "pointer" }}>Install</button>
+                  </div>
+                </div>
+              )}
+
+              {swUpdate && (
+                <div style={{ background: "#333", padding: "10px 16px", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                  <div style={{ fontSize: 13, color: "#fff", fontWeight: 600 }}>New version available!</div>
+                  <button onClick={handleUpdateClick} style={{ background: "#4ade80", border: "none", color: "#000", padding: "6px 12px", borderRadius: 8, fontSize: 12, fontWeight: 700, cursor: "pointer" }}>Update</button>
+                </div>
+              )}
+
               <div className="app-scroll-body">
                 {tab === "home" && (
                   <div>
@@ -1327,7 +1422,7 @@ export default function App() {
                     onClick={() => setExpensePaymentMethod("cash")}
                     style={{
                       flex: 1,
-                      padding: "12px",
+                      padding: "10px",
                       borderRadius: 12,
                       border: expensePaymentMethod === "cash" ? "2px solid #2e7d32" : "1px solid #ddd",
                       background: expensePaymentMethod === "cash" ? "#E8F5E9" : "#fff",
@@ -1337,18 +1432,18 @@ export default function App() {
                       display: "flex",
                       alignItems: "center",
                       justifyContent: "center",
-                      gap: 8,
+                      gap: 4,
                       transition: "all 0.2s"
                     }}
                   >
-                    <span>💵</span> Cash in Hand
+                    <span>💵</span> Cash
                   </button>
                   <button
                     type="button"
                     onClick={() => setExpensePaymentMethod("online")}
                     style={{
                       flex: 1,
-                      padding: "12px",
+                      padding: "10px",
                       borderRadius: 12,
                       border: expensePaymentMethod === "online" ? "2px solid #1565C0" : "1px solid #ddd",
                       background: expensePaymentMethod === "online" ? "#E3F2FD" : "#fff",
@@ -1358,13 +1453,62 @@ export default function App() {
                       display: "flex",
                       alignItems: "center",
                       justifyContent: "center",
-                      gap: 8,
+                      gap: 4,
                       transition: "all 0.2s"
                     }}
                   >
-                    <span>📱</span> UPI / Digital
+                    <span>📱</span> UPI
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setExpensePaymentMethod("split")}
+                    style={{
+                      flex: 1,
+                      padding: "10px",
+                      borderRadius: 12,
+                      border: expensePaymentMethod === "split" ? "2px solid #7e22ce" : "1px solid #ddd",
+                      background: expensePaymentMethod === "split" ? "#f3e8ff" : "#fff",
+                      color: expensePaymentMethod === "split" ? "#7e22ce" : "#555",
+                      fontWeight: 600,
+                      cursor: "pointer",
+                      display: "flex",
+                      alignItems: "center",
+                      justifyContent: "center",
+                      gap: 4,
+                      transition: "all 0.2s"
+                    }}
+                  >
+                    <span>⚖️</span> Split
                   </button>
                 </div>
+
+                {expensePaymentMethod === "split" && (
+                  <div style={{ background: "#f8fafc", padding: 12, borderRadius: 12, marginBottom: 16, border: "1px solid #e2e8f0" }}>
+                    <div style={{ fontSize: 13, fontWeight: 600, color: "#334155", marginBottom: 8 }}>Split Details</div>
+                    <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+                      <div style={{ flex: 1 }}>
+                        <label style={{ fontSize: 11, color: "#64748b", display: "block", marginBottom: 4 }}>Cash Part</label>
+                        <input
+                          type="number"
+                          inputMode="decimal"
+                          placeholder="0.00"
+                          value={splitCashAmount}
+                          onChange={(e) => setSplitCashAmount(e.target.value)}
+                          style={{
+                            width: "100%", padding: 8, fontSize: 14, borderRadius: 8, border: "1px solid #cbd5e1", boxSizing: "border-box"
+                          }}
+                        />
+                      </div>
+                      <div style={{ fontSize: 14, color: "#94a3b8", marginTop: 16 }}>+</div>
+                      <div style={{ flex: 1 }}>
+                        <label style={{ fontSize: 11, color: "#64748b", display: "block", marginBottom: 4 }}>UPI Part</label>
+                        <div style={{ padding: "8px 12px", background: "#e2e8f0", borderRadius: 8, fontSize: 14, color: "#334155", fontWeight: 600, border: "1px solid transparent" }}>
+                          {fmt(Math.max(0, (parseFloat(expenseAmount) || 0) - (parseFloat(splitCashAmount) || 0)))}
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                )}
                 
                 <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
                   <span style={{ fontSize: 13, fontWeight: 600, color: "#555" }}>Category</span>
