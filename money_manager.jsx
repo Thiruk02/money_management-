@@ -139,7 +139,7 @@ function LoginScreen({ onLogin }) {
         justifyContent: "center",
         background: "linear-gradient(160deg, #0d47a1 0%, #1565c0 40%, #42a5f5 100%)",
         fontFamily: 'system-ui, "Segoe UI", Roboto, sans-serif',
-        padding: 24,
+        padding: "calc(24px + env(safe-area-inset-top, 0px)) calc(24px + env(safe-area-inset-right, 0px)) calc(24px + env(safe-area-inset-bottom, 0px)) calc(24px + env(safe-area-inset-left, 0px))",
         boxSizing: "border-box",
       }}
     >
@@ -758,6 +758,7 @@ export default function App() {
           align-items: center;
           justify-content: center;
           min-height: 100vh;
+          min-height: 100dvh;
           width: 100vw;
           background: #0b0f19;
           box-sizing: border-box;
@@ -767,6 +768,7 @@ export default function App() {
         .app-container {
           width: 100%;
           height: 100vh;
+          height: 100dvh;
           background: #f8fafc;
           display: flex;
           flex-direction: column;
@@ -798,6 +800,37 @@ export default function App() {
           }
         }
         
+        /* Mobile-only: safe area for real devices */
+        @media (max-width: 499px) {
+          .app-header {
+            padding-top: calc(16px + env(safe-area-inset-top, 0px)) !important;
+            padding-left: calc(16px + env(safe-area-inset-left, 0px)) !important;
+            padding-right: calc(16px + env(safe-area-inset-right, 0px)) !important;
+          }
+          
+          .app-bottom-nav {
+            padding-bottom: calc(8px + env(safe-area-inset-bottom, 0px)) !important;
+            padding-left: env(safe-area-inset-left, 0px) !important;
+            padding-right: env(safe-area-inset-right, 0px) !important;
+          }
+          
+          .app-fab-add {
+            bottom: calc(20px + env(safe-area-inset-bottom, 0px)) !important;
+          }
+          
+          .app-scroll-body {
+            padding-bottom: calc(90px + env(safe-area-inset-bottom, 0px)) !important;
+            padding-left: calc(16px + env(safe-area-inset-left, 0px)) !important;
+            padding-right: calc(16px + env(safe-area-inset-right, 0px)) !important;
+          }
+          
+          .bottom-sheet {
+            padding-bottom: calc(24px + env(safe-area-inset-bottom, 0px)) !important;
+            padding-left: calc(24px + env(safe-area-inset-left, 0px)) !important;
+            padding-right: calc(24px + env(safe-area-inset-right, 0px)) !important;
+          }
+        }
+        
         .app-main-content {
           display: flex;
           flex-direction: column;
@@ -826,10 +859,12 @@ export default function App() {
         .app-scroll-body {
           flex: 1;
           overflow-y: auto;
+          overflow-x: hidden;
           padding: 16px;
           padding-bottom: calc(90px + env(safe-area-inset-bottom, 16px));
           box-sizing: border-box;
           -webkit-overflow-scrolling: touch;
+          overscroll-behavior-y: contain;
         }
         
         .app-bottom-nav {
@@ -1277,7 +1312,7 @@ export default function App() {
               style={{
                 position: "absolute",
                 left: "50%",
-                bottom: 88,
+                bottom: "calc(88px + env(safe-area-inset-bottom, 0px))",
                 transform: "translateX(-50%)",
                 background: "rgba(30, 41, 59, 0.95)",
                 color: "#fff",
@@ -1289,6 +1324,7 @@ export default function App() {
                 boxShadow: "0 4px 20px rgba(0,0,0,0.15)",
                 textAlign: "center",
                 width: "80%",
+                maxWidth: "calc(100% - 48px)",
                 boxSizing: "border-box",
               }}
             >
